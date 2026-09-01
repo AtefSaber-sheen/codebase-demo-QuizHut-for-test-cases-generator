@@ -1,0 +1,130 @@
+name: Generate Test Cases with Claude
+
+on:
+  workflow_dispatch:      # manual trigger button in the Actions tab
+  pull_request:
+    branches: [main]
+  # push:
+  #   branches: [main]
+
+jobs:
+  generate-test-cases:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # needed if you want to commit results back
+      pull-requests: write # needed if you want the job to open a PR
+
+    steps:
+      # 1. Checkout the codebase to analyze
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          path: codebase
+
+      # 2. Checkout the agentic tool repo
+      - name: Checkout test-cases-generator-demo
+        uses: actions/checkout@v4
+        with:
+          repository: AtefSaber-sheen/test-cases-generator-demo
+          path: agent-tool
+
+      # 3. (Optional) Set up a runtime if the tool repo needs one to run local
+      #    pre/post-processing scripts. Delete this block if not needed.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install tool dependencies
+        working-directory: agent-tool
+        run: |
+          if [ -f package.json ]; then npm ci; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # 4. Build context: a file tree + key source files, capped in size
+      #    so the prompt doesn't blow past context limits.
+      - name: Build codebase context
+        working-directory: codebase
+        run: |
+          {
+            echo "## Repository structure"
+            find . -path ./.git -prune -o -type f -print | sed 's|^\./||' | head -300
+            echo
+            echo "## Key file contents"
+            # Adjust extensions/paths to match this codebase's stack
+            for f in $(find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" \) \
+                        -not -path "*/node_modules/*" -not -path "*/.git/*" | head -30); do
+              echo "### $f"
+              echo '```'
+              sed -n '1,200p' "$f"
+              echo '```'
+              echo
+            done
+          } > ../context.md
+
+      # 5. Assemble the prompt: instructions from the agentic tool repo
+      #    (e.g. its README or a prompts/ file) + the codebase context.
+      - name: Build prompt
+        run: |
+          {
+            echo "You are acting as the test-cases-generator-tool defined in the"
+            echo "test-cases-generator-demo repository. Follow its methodology to"
+            echo "analyze the codebase below and produce a structured set of test"
+            echo "cases (unit, integration, and edge cases as appropriate)."
+            echo
+            echo "## Tool instructions"
+            cat agent-tool/README.md 2>/dev/null || echo "(no README.md found — add the actual instructions/prompt file path here)"
+            echo
+            echo "## Codebase context"
+            cat context.md
+            echo
+            echo "## Output format"
+            echo "Return the test cases as a markdown document with one section"
+            echo "per module/component, each containing a numbered list of test"
+            echo "cases with: description, preconditions, steps, expected result."
+          } > prompt.txt
+
+      # 6. Call the Anthropic API
+      - name: Call Claude API
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          PROMPT_TEXT=$(cat prompt.txt)
+
+          jq -n --arg prompt "$PROMPT_TEXT" \
+            '{
+              model: "claude-sonnet-5",
+              max_tokens: 4096,
+              messages: [
+                { role: "user", content: $prompt }
+              ]
+            }' > request.json
+
+          curl -sS https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @request.json \
+            -o response.json
+
+          # Extract the text content into the final output file
+          jq -r '.content[] | select(.type=="text") | .text' response.json > test-cases.md
+
+      # 7. Upload as a downloadable artifact
+      - name: Upload test cases artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-test-cases
+          path: test-cases.md
+
+      # 8. (Optional) Commit the result back into the repo instead of/as well as
+      #    uploading it as an artifact.
+      # - name: Commit test cases
+      #   run: |
+      #     cd codebase
+      #     cp ../test-cases.md ./test-cases.md
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add test-cases.md
+      #     git commit -m "chore: update generated test cases" || echo "no changes"
+      #     git push
