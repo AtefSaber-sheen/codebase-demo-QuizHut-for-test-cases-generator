@@ -1,10 +1,16 @@
 name: Generate Test Cases with Claude
 
+run-name: "Generate Test Cases [${{ github.event.inputs.correlation_id || 'auto' }}]"
+
 on:
   workflow_dispatch:
     inputs:
       prompt:
         description: 'Prompt describing how the test-cases-generator-tool and Claude should analyze the codebase'
+        required: true
+        type: string
+      correlation_id:
+        description: 'Client-supplied ID used to identify and poll this specific run'
         required: true
         type: string
   pull_request:
@@ -16,6 +22,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      id-token: write   # required for claude-code-action to fetch its OIDC token
 
     steps:
       # 1. Checkout the codebase to analyze
@@ -31,38 +38,58 @@ jobs:
           repository: AtefSaber-sheen/test-cases-generator-demo
           path: agent-tool
 
-      # 3. Build the prompt file. If triggered manually via curl, use the
-      #    supplied input. Otherwise (e.g. pull_request trigger) fall back
-      #    to a default prompt.
+      # 3. Build the prompt. Falls back to a default if not manually dispatched
+      #    with an input. Every echoed line is prefixed with the
+      #    correlation_id so a client polling logs via the API can filter
+      #    to just this run's output.
       - name: Build prompt
+        id: build_prompt
         env:
           PROMPT_INPUT: ${{ github.event.inputs.prompt }}
+          CID: ${{ github.event.inputs.correlation_id }}
         run: |
+          echo "[cid:$CID] Workflow run started"
           if [ -n "$PROMPT_INPUT" ]; then
-            printf '%s\n' "$PROMPT_INPUT" > prompt.txt
+            PROMPT_TEXT="$PROMPT_INPUT"
           else
-            {
-              echo "You are acting as the test-cases-generator-tool defined in the"
-              echo "test-cases-generator-demo repository. Follow its methodology to"
-              echo "analyze the codebase in the ./codebase directory and produce a"
-              echo "structured set of test cases (unit, integration, and edge cases"
-              echo "as appropriate). Write the result to codebase/test-cases.md."
-            } > prompt.txt
+            PROMPT_TEXT="You are acting as the test-cases-generator-tool defined in the test-cases-generator-demo repository. Follow its methodology to analyze the codebase in the ./codebase directory and produce a structured set of test cases (unit, integration, and edge cases as appropriate). Write the result to codebase/test-cases.md."
           fi
-          echo "---- Prompt used ----"
-          cat prompt.txt
+          echo "[cid:$CID] ---- Prompt used ----"
+          echo "[cid:$CID] $PROMPT_TEXT"
+          {
+            echo "prompt<<PROMPT_EOF"
+            echo "$PROMPT_TEXT"
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      # 4. Run Claude Code using the Team-plan OAuth token
+      # 4. Run Claude Code using the Team-plan OAuth token.
+      #    ⚠️ UNVERIFIED: `prompt` and `working_directory` are my best guess
+      #    at this action's input names based on common convention — the
+      #    last failed run showed valid inputs including trigger_phrase,
+      #    assignee_trigger, label_trigger, base_branch, branch_prefix,
+      #    branch_name_template, allowed_bots, allowed_non_write_users(?)
+      #    which suggests this action version may be built around
+      #    mention/label-triggered PR workflows rather than a direct
+      #    "run this prompt" mode. Before relying on this, open
+      #    https://github.com/anthropics/claude-code-action and check
+      #    action.yml for the real input list, or paste me the full
+      #    "Show more" output from the failed run's warnings.
       - name: Run Claude Code
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt_file: prompt.txt
+          prompt: ${{ steps.build_prompt.outputs.prompt }}
           working_directory: codebase
 
-      # 5. Upload result as artifact
+      # 5. Upload result as artifact. Naming it with the correlation_id lets
+      #    the client find and download exactly this run's output, even if
+      #    multiple runs are in flight at once.
       - name: Upload test cases artifact
         uses: actions/upload-artifact@v4
         with:
-          name: generated-test-cases
+          name: generated-test-cases-${{ github.event.inputs.correlation_id }}
           path: codebase/test-cases.md
+
+      - name: Log completion
+        if: always()
+        run: echo "[cid:${{ github.event.inputs.correlation_id }}] Workflow run finished with status ${{ job.status }}"
