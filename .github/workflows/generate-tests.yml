@@ -79,7 +79,6 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.build_prompt.outputs.prompt }}
-          working_directory: codebase
 
       # 5. Upload result as artifact. Naming it with the correlation_id lets
       #    the client find and download exactly this run's output, even if
