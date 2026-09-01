@@ -13,16 +13,12 @@ on:
         description: 'Client-supplied ID used to identify and poll this specific run'
         required: true
         type: string
-  pull_request:
-    branches: [main]
 
 jobs:
   generate-test-cases:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
-      id-token: write   # required for claude-code-action to fetch its OIDC token
 
     steps:
       # 1. Checkout the codebase to analyze
@@ -38,56 +34,79 @@ jobs:
           repository: AtefSaber-sheen/test-cases-generator-demo
           path: agent-tool
 
-      # 3. Build the prompt. Falls back to a default if not manually dispatched
-      #    with an input. Every echoed line is prefixed with the
-      #    correlation_id so a client polling logs via the API can filter
-      #    to just this run's output.
+      # 3. Node is required by the Claude Code CLI
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 4. Install the Claude Code CLI globally
+      - name: Install Claude Code
+        env:
+          CID: ${{ github.event.inputs.correlation_id }}
+        run: |
+          echo "[cid:$CID] Installing Claude Code CLI..."
+          npm install -g @anthropic-ai/claude-code
+          claude --version || true
+
+      # 5. Build the prompt file
       - name: Build prompt
-        id: build_prompt
         env:
           PROMPT_INPUT: ${{ github.event.inputs.prompt }}
           CID: ${{ github.event.inputs.correlation_id }}
         run: |
-          echo "[cid:$CID] Workflow run started"
+          echo "[cid:$CID] Building prompt..."
           if [ -n "$PROMPT_INPUT" ]; then
-            PROMPT_TEXT="$PROMPT_INPUT"
+            printf '%s\n' "$PROMPT_INPUT" > prompt.txt
           else
-            PROMPT_TEXT="You are acting as the test-cases-generator-tool defined in the test-cases-generator-demo repository. Follow its methodology to analyze the codebase in the ./codebase directory and produce a structured set of test cases (unit, integration, and edge cases as appropriate). Write the result to codebase/test-cases.md."
+            printf '%s\n' "You are acting as the test-cases-generator-tool defined in the test-cases-generator-demo repository. Analyze the codebase in ./codebase and produce a structured set of test cases. Write the result to codebase/test-cases.md." > prompt.txt
           fi
           echo "[cid:$CID] ---- Prompt used ----"
-          echo "[cid:$CID] $PROMPT_TEXT"
-          {
-            echo "prompt<<PROMPT_EOF"
-            echo "$PROMPT_TEXT"
-            echo "PROMPT_EOF"
-          } >> "$GITHUB_OUTPUT"
+          cat prompt.txt
 
-      # 4. Run Claude Code using the Team-plan OAuth token.
-      #    ⚠️ UNVERIFIED: `prompt` and `working_directory` are my best guess
-      #    at this action's input names based on common convention — the
-      #    last failed run showed valid inputs including trigger_phrase,
-      #    assignee_trigger, label_trigger, base_branch, branch_prefix,
-      #    branch_name_template, allowed_bots, allowed_non_write_users(?)
-      #    which suggests this action version may be built around
-      #    mention/label-triggered PR workflows rather than a direct
-      #    "run this prompt" mode. Before relying on this, open
-      #    https://github.com/anthropics/claude-code-action and check
-      #    action.yml for the real input list, or paste me the full
-      #    "Show more" output from the failed run's warnings.
+      # 6. Run Claude Code headlessly with the setup token.
+      #    -p runs in non-interactive "print" mode.
+      #    --permission-mode / --dangerously-skip-permissions is needed so it
+      #    can write files without an interactive approval prompt in CI.
       - name: Run Claude Code
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: ${{ steps.build_prompt.outputs.prompt }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CID: ${{ github.event.inputs.correlation_id }}
+        run: |
+          echo "[cid:$CID] Running Claude Code..."
+          cd codebase
+          claude -p "$(cat ../prompt.txt)" \
+            --dangerously-skip-permissions \
+            --output-format text \
+            2>&1 | tee ../claude-output.log
+          echo "[cid:$CID] Claude Code finished."
 
-      # 5. Upload result as artifact. Naming it with the correlation_id lets
-      #    the client find and download exactly this run's output, even if
-      #    multiple runs are in flight at once.
+      # 7. Make sure there's something to upload even if Claude wrote
+      #    its answer to stdout rather than to a file.
+      - name: Collect outputs
+        if: always()
+        env:
+          CID: ${{ github.event.inputs.correlation_id }}
+        run: |
+          mkdir -p output
+          if [ -f codebase/test-cases.md ]; then
+            cp codebase/test-cases.md output/
+            echo "[cid:$CID] Found codebase/test-cases.md"
+          else
+            echo "[cid:$CID] No test-cases.md written; falling back to raw CLI output."
+          fi
+          if [ -f claude-output.log ]; then
+            cp claude-output.log output/
+          fi
+          ls -la output
+
+      # 8. Upload results, tagged with the correlation id
       - name: Upload test cases artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-test-cases-${{ github.event.inputs.correlation_id }}
-          path: codebase/test-cases.md
+          path: output/
 
       - name: Log completion
         if: always()
