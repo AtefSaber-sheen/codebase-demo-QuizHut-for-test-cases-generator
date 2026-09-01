@@ -1,18 +1,21 @@
 name: Generate Test Cases with Claude
 
 on:
-  workflow_dispatch:      # manual trigger button in the Actions tab
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt describing how the test-cases-generator-tool and Claude should analyze the codebase'
+        required: true
+        type: string
   pull_request:
     branches: [main]
-  # push:
-  #   branches: [main]
 
 jobs:
   generate-test-cases:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # needed if you want Claude to commit results back
-      pull-requests: write # needed if you want it to comment on / open a PR
+      contents: write
+      pull-requests: write
 
     steps:
       # 1. Checkout the codebase to analyze
@@ -21,64 +24,45 @@ jobs:
         with:
           path: codebase
 
-      # 2. Checkout the agentic tool repo (so its instructions/prompt files
-      #    are available to reference or copy into place)
+      # 2. Checkout the agentic tool repo
       - name: Checkout test-cases-generator-demo
         uses: actions/checkout@v4
         with:
           repository: AtefSaber-sheen/test-cases-generator-demo
           path: agent-tool
 
-      # 3. Build the prompt file: tool's methodology + a pointer at the
-      #    codebase Claude Code should analyze. Claude Code itself will
-      #    explore the checked-out "codebase" directory, so you don't need
-      #    to manually dump file contents like in the curl version.
+      # 3. Build the prompt file. If triggered manually via curl, use the
+      #    supplied input. Otherwise (e.g. pull_request trigger) fall back
+      #    to a default prompt.
       - name: Build prompt
+        env:
+          PROMPT_INPUT: ${{ github.event.inputs.prompt }}
         run: |
-          {
-            echo "You are acting as the test-cases-generator-tool defined in the"
-            echo "test-cases-generator-demo repository. Follow its methodology to"
-            echo "analyze the codebase in the ./codebase directory and produce a"
-            echo "structured set of test cases (unit, integration, and edge cases"
-            echo "as appropriate)."
-            echo
-            echo "## Tool instructions"
-            cat agent-tool/README.md 2>/dev/null || echo "(point this at the actual instructions/prompt file in test-cases-generator-demo)"
-            echo
-            echo "## Output format"
-            echo "Write the result to codebase/test-cases.md as a markdown document"
-            echo "with one section per module/component, each containing a numbered"
-            echo "list of test cases with: description, preconditions, steps,"
-            echo "expected result."
-          } > prompt.txt
+          if [ -n "$PROMPT_INPUT" ]; then
+            printf '%s\n' "$PROMPT_INPUT" > prompt.txt
+          else
+            {
+              echo "You are acting as the test-cases-generator-tool defined in the"
+              echo "test-cases-generator-demo repository. Follow its methodology to"
+              echo "analyze the codebase in the ./codebase directory and produce a"
+              echo "structured set of test cases (unit, integration, and edge cases"
+              echo "as appropriate). Write the result to codebase/test-cases.md."
+            } > prompt.txt
+          fi
+          echo "---- Prompt used ----"
+          cat prompt.txt
 
-      # 4. Run Claude Code using the Team-plan OAuth token.
-      #    NOTE: verify the exact action version and input names against
-      #    docs.claude.com/en/docs/claude-code before relying on this in
-      #    production -- action interfaces can change.
+      # 4. Run Claude Code using the Team-plan OAuth token
       - name: Run Claude Code
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: prompt.txt
           working_directory: codebase
-          # Some versions of this action expect `prompt:` (inline string)
-          # instead of `prompt_file:` -- check the action's README/inputs
-          # if this errors.
 
-      # 5. Upload whatever Claude Code produced as a downloadable artifact
+      # 5. Upload result as artifact
       - name: Upload test cases artifact
         uses: actions/upload-artifact@v4
         with:
           name: generated-test-cases
           path: codebase/test-cases.md
-
-      # 6. (Optional) Commit the result back into the repo
-      # - name: Commit test cases
-      #   run: |
-      #     cd codebase
-      #     git config user.name "github-actions[bot]"
-      #     git config user.email "github-actions[bot]@users.noreply.github.com"
-      #     git add test-cases.md
-      #     git commit -m "chore: update generated test cases" || echo "no changes"
-      #     git push
