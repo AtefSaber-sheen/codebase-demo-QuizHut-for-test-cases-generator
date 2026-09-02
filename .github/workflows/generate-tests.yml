@@ -49,6 +49,40 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version || true
 
+      # 4b. Make the generator's skills discoverable to Claude Code.
+      #     Claude Code loads skills from .claude/skills/<name>/SKILL.md
+      #     relative to its working directory, so the tool repo's skills
+      #     must be copied into the codebase checkout.
+      - name: Install generator skills
+        env:
+          CID: ${{ github.event.inputs.correlation_id }}
+        shell: bash
+        run: |
+          echo "[cid:$CID] ---- agent-tool repo layout ----"
+          find agent-tool -type f -name '*.md' -not -path '*/.git/*' | sort
+
+          mkdir -p codebase/.claude/skills
+
+          # Copy every directory containing a SKILL.md into .claude/skills/,
+          # preserving the skill folder name.
+          found=0
+          while IFS= read -r skillfile; do
+            skilldir="$(dirname "$skillfile")"
+            name="$(basename "$skilldir")"
+            echo "[cid:$CID] Installing skill: $name"
+            mkdir -p "codebase/.claude/skills/$name"
+            cp -r "$skilldir/." "codebase/.claude/skills/$name/"
+            found=$((found+1))
+          done < <(find agent-tool -type f -name 'SKILL.md' -not -path '*/.git/*')
+
+          echo "[cid:$CID] Installed $found skill(s)."
+          if [ "$found" -eq 0 ]; then
+            echo "[cid:$CID] WARNING: no SKILL.md found in agent-tool - Claude will improvise."
+          fi
+
+          echo "[cid:$CID] ---- installed skills ----"
+          find codebase/.claude/skills -name 'SKILL.md' | sort
+
       # 5. Build the prompt file
       - name: Build prompt
         env:
@@ -105,9 +139,10 @@ jobs:
           done
 
           # b) Any md/csv/json generated in the codebase that wasn't in the
-          #    original checkout.
+          #    original checkout. Excludes the .claude skills we installed.
           cd codebase
           git ls-files --others --exclude-standard \
+            | grep -v '^\.claude/' \
             | grep -Ei '\.(md|csv|json)$' \
             | while read -r f; do
                 echo "[cid:$CID] Found generated file: $f"
