@@ -124,7 +124,12 @@ jobs:
         shell: bash
         run: |
           set +e   # never let a single copy failure abort collection
-
+          echo "[cid:$CID] ---- Files in codebase/ ----"
+          if [ -d "codebase" ]; then
+            find codebase -type f | sort
+          else
+            echo "[cid:$CID] Directory 'codebase' not found."
+          fi
           DEST="$GITHUB_WORKSPACE/collected"
           mkdir -p "$DEST"
 
