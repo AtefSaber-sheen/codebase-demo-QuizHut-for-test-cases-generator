@@ -65,27 +65,7 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version || true
 
-      # 5. Wire the agentic tool into the codebase so Claude Code can see the
-      #    skills, and the skills' own CLI tools resolve at the paths the
-      #    README documents.
-      - name: Install agentic tool into codebase
-        env:
-          CID: ${{ github.event.inputs.correlation_id }}
-        run: |
-          echo "[cid:$CID] Copying skills, tools and docs into codebase..."
-          mkdir -p codebase/.claude/skills
-          cp -r agent-tool/.claude/skills/. codebase/.claude/skills/
-          cp -r agent-tool/test-cases-generator-demo-tools codebase/test-cases-generator-demo-tools
-          cp -r agent-tool/test-cases-generator-demo-docs codebase/test-cases-generator-demo-docs
-          echo "[cid:$CID] ---- codebase/.claude/skills ----"
-          ls codebase/.claude/skills
-          echo "[cid:$CID] ---- codebase/test-cases-generator-demo-tools ----"
-          ls codebase/test-cases-generator-demo-tools
-
-      # 6. Build the prompt file. Defaults to running the full four-stage
-      #    pipeline (codebase-recon -> behavior-spec -> test-design-from-code
-      #    -> suite-export) exactly as documented in the tool's README, so a
-      #    run produces the two deliverables even with no custom prompt.
+      # 5. Build the prompt file
       - name: Build prompt
         env:
           PROMPT_INPUT: ${{ github.event.inputs.prompt }}
@@ -150,7 +130,12 @@ jobs:
         shell: bash
         run: |
           set +e   # never let a single copy failure abort collection
-
+          echo "[cid:$CID] ---- Files in codebase/ ----"
+          if [ -d "codebase" ]; then
+            find codebase -type f | sort
+          else
+            echo "[cid:$CID] Directory 'codebase' not found."
+          fi
           DEST="$GITHUB_WORKSPACE/collected"
           mkdir -p "$DEST"
 
@@ -165,10 +150,10 @@ jobs:
           done
 
           # b) Any md/csv/json generated in the codebase that wasn't in the
-          #    original checkout. Excludes the agentic tool's own installed
-          #    files (skills/tools/docs) so they aren't reported as "generated".
+          #    original checkout.
           cd codebase
           git ls-files --others --exclude-standard \
+            | grep -v '^\.claude/' \
             | grep -Ei '\.(md|csv|json)$' \
             | grep -Ev '^(\.claude/skills/|test-cases-generator-demo-tools/|test-cases-generator-demo-docs/)' \
             | while read -r f; do
