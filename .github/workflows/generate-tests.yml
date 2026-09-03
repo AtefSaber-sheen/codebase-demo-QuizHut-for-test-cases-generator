@@ -96,6 +96,18 @@ jobs:
           echo "[cid:$CID] ---- Prompt used ----"
           cat prompt.txt
 
+      # 6. Checkout this workflow's own repo (unscoped, at the workspace
+      #    root) so the run-log generator script committed alongside it is
+      #    available to later steps. Kept separate from the "codebase"
+      #    checkout in step 1 so Claude never sees or touches this script.
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+          sparse-checkout: |
+            .github/workflows/scripts
+          sparse-checkout-cone-mode: false
+
       # 7. Run Claude Code headlessly with the setup token.
       #    -p runs in non-interactive "print" mode.
       #    --dangerously-skip-permissions is needed so it can write files
@@ -103,6 +115,12 @@ jobs:
       #    --model and --effort are caller-selectable (see workflow_dispatch
       #    inputs above), so run-and-download.ps1 can switch them per run
       #    instead of them being hardcoded here. Defaults to sonnet / medium.
+      #    --output-format stream-json --verbose emits one JSON event per
+      #    turn / tool call / reasoning step. That raw stream is captured as
+      #    claude-run.jsonl and is the source of truth used below to build a
+      #    detailed, human-readable log of how Claude analyzed and
+      #    implemented the requirements. claude-output.log keeps a plain-text
+      #    copy of the same stream as a quick fallback for debugging.
       - name: Run Claude Code
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -112,13 +130,33 @@ jobs:
         run: |
           echo "[cid:$CID] Running Claude Code with model='$MODEL' effort='$EFFORT'..."
           cd codebase
+          set -o pipefail
           claude -p "$(cat ../prompt.txt)" \
             --model "$MODEL" \
             --effort "$EFFORT" \
             --dangerously-skip-permissions \
-            --output-format text \
-            2>&1 | tee ../claude-output.log
-          echo "[cid:$CID] Claude Code finished."
+            --output-format stream-json \
+            --verbose \
+            2>&1 | tee ../claude-run.jsonl
+          STATUS=$?
+          echo "[cid:$CID] Claude Code finished with exit code $STATUS."
+          exit $STATUS
+
+      # 7b. Turn the raw JSON event stream into two things a human can read:
+      #     - claude-output.log:   plain text, same shape as the old text log
+      #     - claude-run-log.md:   a detailed Markdown report of how Claude
+      #                            approached and implemented the requirements
+      #                            (prompt used, each step/tool call taken,
+      #                            files touched, and the final result)
+      - name: Generate detailed run log
+        if: always()
+        env:
+          CID: ${{ github.event.inputs.correlation_id }}
+          MODEL: ${{ github.event.inputs.model }}
+          EFFORT: ${{ github.event.inputs.effort }}
+        run: |
+          echo "[cid:$CID] Generating detailed run log from claude-run.jsonl..."
+          node workflow-repo/.github/workflows/scripts/generate-run-log.js
 
       # 8. Collect everything the generator produced. Results land either in
       #    an "out"-style folder (the documented suite-export destination) or
@@ -163,10 +201,15 @@ jobs:
               done
           cd ..
 
-          # c) Raw CLI log as a fallback / for debugging.
-          if [ -f claude-output.log ]; then
-            cp claude-output.log "$DEST/"
-          fi
+          # c) Run logs: the detailed Markdown log of how Claude implemented
+          #    the requirements, the raw JSON event stream it was built from,
+          #    and the plain-text fallback log.
+          mkdir -p "$DEST/logs"
+          for f in claude-run-log.md claude-run.jsonl claude-output.log; do
+            if [ -f "$f" ]; then
+              cp "$f" "$DEST/logs/"
+            fi
+          done
 
           echo "[cid:$CID] ---- Collected files ----"
           find "$DEST" -type f | sed "s|$DEST/||" | sort
