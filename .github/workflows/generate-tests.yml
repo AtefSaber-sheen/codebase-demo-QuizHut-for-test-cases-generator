@@ -330,26 +330,29 @@ jobs:
             fi
           done
 
-          # d) The skills that actually ran, for auditing. Kept in their own
-          #    folder rather than in out/ so the two deliverables stay easy
-          #    to find, and copied from codebase/ (not agent-tool/) so this
-          #    is the exact copy Claude loaded.
+          # d) Report the skills that were installed and actually loaded by
+          #    Claude - to the LOG ONLY. These are inputs, not results, so
+          #    they are deliberately NOT copied into $DEST: the artifact
+          #    holds outputs and logs only. This prints from
+          #    codebase/.claude/skills (not agent-tool/) so it reflects the
+          #    exact copies Claude loaded.
+          echo "[cid:$CID] ---- Skills used in this run (not downloaded) ----"
           if [ -d "codebase/.claude/skills" ]; then
-            echo "[cid:$CID] Collecting skills used..."
-            mkdir -p "$DEST/skills-used"
-            cp -r codebase/.claude/skills/. "$DEST/skills-used/"
+            if [ -d "agent-tool/.git" ]; then
+              echo "[cid:$CID] tool repo:   AtefSaber-sheen/test-cases-generator-demo"
+              echo "[cid:$CID] tool commit: $(git -C agent-tool rev-parse HEAD 2>/dev/null || echo unknown)"
+            fi
+            for d in codebase/.claude/skills/*/; do
+              [ -d "$d" ] || continue
+              name="$(basename "$d")"
+              if [ -f "$d/SKILL.md" ]; then
+                echo "[cid:$CID]   [OK] $name ($(wc -c < "$d/SKILL.md" | tr -d ' ') bytes)"
+              else
+                echo "[cid:$CID]   [MISSING SKILL.md] $name"
+              fi
+            done
           else
-            echo "[cid:$CID] WARNING: codebase/.claude/skills not found - skills were not installed."
-          fi
-
-          # Record which version of the tool produced this run, so a suite can
-          # be traced back to the exact skills that generated it.
-          if [ -d "agent-tool/.git" ]; then
-            {
-              echo "repository: AtefSaber-sheen/test-cases-generator-demo"
-              echo "commit:     $(git -C agent-tool rev-parse HEAD)"
-              echo "committed:  $(git -C agent-tool log -1 --format=%cI)"
-            } > "$DEST/skills-used/TOOL_VERSION.txt" 2>/dev/null || true
+            echo "[cid:$CID] WARNING: codebase/.claude/skills not found - skills were NOT installed."
           fi
 
           echo "[cid:$CID] ---- Collected files ----"
