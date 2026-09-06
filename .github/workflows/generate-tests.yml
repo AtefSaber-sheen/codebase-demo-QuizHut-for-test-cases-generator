@@ -330,6 +330,28 @@ jobs:
             fi
           done
 
+          # d) The skills that actually ran, for auditing. Kept in their own
+          #    folder rather than in out/ so the two deliverables stay easy
+          #    to find, and copied from codebase/ (not agent-tool/) so this
+          #    is the exact copy Claude loaded.
+          if [ -d "codebase/.claude/skills" ]; then
+            echo "[cid:$CID] Collecting skills used..."
+            mkdir -p "$DEST/skills-used"
+            cp -r codebase/.claude/skills/. "$DEST/skills-used/"
+          else
+            echo "[cid:$CID] WARNING: codebase/.claude/skills not found - skills were not installed."
+          fi
+
+          # Record which version of the tool produced this run, so a suite can
+          # be traced back to the exact skills that generated it.
+          if [ -d "agent-tool/.git" ]; then
+            {
+              echo "repository: AtefSaber-sheen/test-cases-generator-demo"
+              echo "commit:     $(git -C agent-tool rev-parse HEAD)"
+              echo "committed:  $(git -C agent-tool log -1 --format=%cI)"
+            } > "$DEST/skills-used/TOOL_VERSION.txt" 2>/dev/null || true
+          fi
+
           echo "[cid:$CID] ---- Collected files ----"
           find "$DEST" -type f | sed "s|$DEST/||" | sort
           echo "[cid:$CID] Total: $(find "$DEST" -type f | wc -l) file(s)"
