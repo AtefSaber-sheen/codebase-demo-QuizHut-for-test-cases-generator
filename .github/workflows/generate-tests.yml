@@ -50,6 +50,58 @@ jobs:
           repository: AtefSaber-sheen/test-cases-generator-demo
           path: agent-tool
 
+      # 2b. Install the tool INTO the codebase working directory.
+      #     This step is what makes the pipeline actually run.
+      #
+      #     Claude Code only discovers skills under .claude/skills/ relative
+      #     to its own working directory. Step 7 runs it with `cd codebase`,
+      #     so skills left in agent-tool/ are invisible to it - the prompt
+      #     would claim a pipeline that was never loaded, and Claude would
+      #     improvise a plausible-looking suite instead of running the real
+      #     four stages. Copying the tool's full contents into codebase/
+      #     puts the skills, CLIs and docs exactly where the prompt says
+      #     they are.
+      #
+      #     Copied verbatim from the tool repo, so the skills, output
+      #     templates and CSV/report contracts are the upstream ones - not a
+      #     drifted copy vendored into this repo.
+      - name: Install agent tool into codebase
+        env:
+          CID: ${{ github.event.inputs.correlation_id }}
+        run: |
+          set -euo pipefail
+          echo "[cid:$CID] Installing agentic tool into codebase/..."
+
+          # The four skills - the pipeline itself.
+          mkdir -p codebase/.claude/skills
+          cp -r agent-tool/.claude/skills/. codebase/.claude/skills/
+
+          # The CLI tools (recon_scan, depgraph) and operator docs, at the
+          # exact paths the skills and the prompt reference.
+          cp -r agent-tool/test-cases-generator-demo-tools codebase/
+          cp -r agent-tool/test-cases-generator-demo-docs  codebase/
+
+          echo "[cid:$CID] ---- Installed skills ----"
+          ls -1 codebase/.claude/skills
+
+          # Fail loudly here rather than letting Claude silently improvise
+          # a suite without the pipeline.
+          for skill in codebase-recon behavior-spec test-design-from-code suite-export; do
+            if [ ! -f "codebase/.claude/skills/$skill/SKILL.md" ]; then
+              echo "[cid:$CID] ERROR: missing skill '$skill' (no SKILL.md)."
+              exit 1
+            fi
+          done
+
+          for cli in recon_scan/cli.js depgraph/cli.js; do
+            if [ ! -f "codebase/test-cases-generator-demo-tools/$cli" ]; then
+              echo "[cid:$CID] ERROR: missing tool CLI '$cli'."
+              exit 1
+            fi
+          done
+
+          echo "[cid:$CID] All 4 skills and both CLIs installed."
+
       # 3. Node is required by the Claude Code CLI and the tool's own CLIs
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -65,34 +117,99 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version || true
 
-      # 5. Build the prompt file
+      # 5. Build the prompt file.
+      #
+      #    The pipeline contract is ALWAYS prepended, and the caller's prompt
+      #    is appended under it as scope/emphasis. Previously the caller's
+      #    prompt REPLACED these instructions entirely (the pipeline text was
+      #    only the else-branch fallback), so any real dispatch - which always
+      #    supplies a prompt, it is a required input - ran with no pipeline
+      #    instructions at all. That is the difference between running the
+      #    tool and asking Claude to write some test cases.
       - name: Build prompt
         env:
           PROMPT_INPUT: ${{ github.event.inputs.prompt }}
           CID: ${{ github.event.inputs.correlation_id }}
         run: |
+          set -euo pipefail
           echo "[cid:$CID] Building prompt..."
-          if [ -n "$PROMPT_INPUT" ]; then
-            printf '%s\n' "$PROMPT_INPUT" > prompt.txt
-          else
-            cat > prompt.txt <<'EOF'
-          You are running the test-cases-generator-demo agentic pipeline against the
-          codebase in the current directory. Its skills are installed at
-          .claude/skills/ (codebase-recon, behavior-spec, test-design-from-code,
-          suite-export), its CLI tools at test-cases-generator-demo-tools/, and its
-          operator docs at test-cases-generator-demo-docs/.
 
-          Run the full pipeline, scoped to the whole repository:
-          1. Use the codebase-recon skill on . (the current directory).
-          2. Then behavior-spec.
-          3. Then test-design-from-code.
-          4. Then suite-export, writing the two deliverables to ./out
-             (TestCases_{Scope}.csv and TestReport_{Scope}.md).
+          cat > prompt.txt <<'EOF'
+          You are running the test-cases-generator-demo agentic pipeline against
+          the codebase in the current directory.
 
-          Do not write any other file to disk - stages 1-3 hold their findings in
-          context; only suite-export writes, and it writes exactly those two files.
+          The tool is already installed here:
+            - skills:      .claude/skills/  (codebase-recon, behavior-spec,
+                           test-design-from-code, suite-export)
+            - CLI tools:   test-cases-generator-demo-tools/
+            - operator docs: test-cases-generator-demo-docs/
+                           (WORKFLOW.md, AGENTIC_HANDOFF.md)
+
+          NON-NEGOTIABLE RULES
+
+          1. You MUST run the four skills, in order, by invoking each skill and
+             following its SKILL.md exactly:
+               1. codebase-recon  on . (the current directory)
+               2. behavior-spec
+               3. test-design-from-code
+               4. suite-export, writing to ./out
+
+          2. Run each skill's instructions as written. Do NOT summarize, skip,
+             shortcut or re-invent any stage, and do NOT substitute your own
+             test-writing approach for the skill's method. The output format,
+             the CSV columns, the fourteen report sections and the twelve
+             stage-4 checks are defined by the skills - follow those
+             definitions rather than producing your own layout.
+
+          3. Before stage 1, run the mechanical sweeps and use their output as
+             the candidate set the skill then confirms by opening files:
+               node test-cases-generator-demo-tools/recon_scan/cli.js --repo .
+               node test-cases-generator-demo-tools/depgraph/cli.js   --repo .
+
+          4. Scope is the WHOLE repository unless the scope note below narrows
+             it. A narrower scope is a seed, not a filter: the dependency
+             closure of what it calls is in scope too, and unreadable
+             dependencies become EXT boundary surfaces with named failure
+             modes.
+
+          5. Stages 1-3 write NOTHING to disk - they carry their findings in
+             context. suite-export is the ONLY stage that writes, and it writes
+             exactly two files into ./out:
+               out/TestCases_{Scope}.csv
+               out/TestReport_{Scope}.md
+             Write no other file anywhere.
+
+          6. Every test case must trace to real evidence:
+             source path:line -> Surface -> Use Case / Business Rule -> Test
+             Case -> CSV row. Never invent a case whose chain is broken -
+             record it as a gap in the report instead.
+
+          7. Execution layers are limited to API, UI, E2E and Contract. Do not
+             emit Unit or Component cases. A rule enforced deep in the call
+             graph is pulled up and driven through the surface that reaches it,
+             while still citing the deep path:line as evidence.
+
+          8. Ship Review and Automation as Pending on every row. Never
+             self-approve your own output.
+
           EOF
+
+          # Append the caller's prompt as scope/emphasis - never as a
+          # replacement for the contract above.
+          if [ -n "${PROMPT_INPUT:-}" ]; then
+            {
+              cat <<'NOTE'
+
+          OPERATOR REQUEST (scope and emphasis for this run).
+          It refines the scope and focus of the pipeline above.
+          It does NOT override the rules above, and does not
+          authorize skipping a stage or changing the deliverables:
+
+          NOTE
+              printf '%s\n' "$PROMPT_INPUT"
+            } >> prompt.txt
           fi
+
           echo "[cid:$CID] ---- Prompt used ----"
           cat prompt.txt
 
@@ -138,6 +255,8 @@ jobs:
             --output-format stream-json \
             --verbose \
             2>&1 | tee ../claude-run.jsonl
+          # With pipefail set, $? is the pipeline's status - i.e. claude's
+          # failure is preserved rather than masked by tee succeeding.
           STATUS=$?
           echo "[cid:$CID] Claude Code finished with exit code $STATUS."
           exit $STATUS
