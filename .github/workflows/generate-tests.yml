@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: 'sonnet'
+      account_name:
+        description: 'Account whose CLAUDE_CODE_OAUTH_TOKEN secret this run should use (e.g. "atef" -> ATEF_CLAUDE_CODE_OAUTH_TOKEN)'
+        required: false
+        type: string
+        default: ''
       effort:
         description: 'Effort level for the session'
         required: false
@@ -225,6 +230,54 @@ jobs:
             .github/workflows/scripts
           sparse-checkout-cone-mode: false
 
+      # 6b. Resolve which Claude setup token this run should use.
+      #
+      #     The desktop app stores each engineer's setup token as its own
+      #     repository secret named <ACCOUNT>_CLAUDE_CODE_OAUTH_TOKEN, and
+      #     passes the account as the account_name input. That name is only
+      #     known at run time, and the secrets context cannot be indexed by a
+      #     computed key, so the whole context is materialised once via toJSON
+      #     and the entry is picked out of it here.
+      #
+      #     Falls back to the shared CLAUDE_CODE_OAUTH_TOKEN when no account is
+      #     supplied, so manual runs from the Actions tab keep working.
+      #
+      #     The token is written to the job env file and masked, never echoed.
+      #     Only the chosen secret name and whether it was found are printed.
+      - name: Resolve Claude setup token
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          ACCOUNT_NAME: ${{ github.event.inputs.account_name }}
+          CID: ${{ github.event.inputs.correlation_id }}
+        run: |
+          set -euo pipefail
+
+          SECRET_NAME="$(printf '%s' "${ACCOUNT_NAME:-}" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+//; s/_+$//')"
+
+          if [ -n "$SECRET_NAME" ]; then
+            SECRET_NAME="${SECRET_NAME}_CLAUDE_CODE_OAUTH_TOKEN"
+          else
+            SECRET_NAME="CLAUDE_CODE_OAUTH_TOKEN"
+            echo "[cid:$CID] No account_name supplied; falling back to the shared secret."
+          fi
+
+          echo "[cid:$CID] Using secret '$SECRET_NAME'."
+
+          TOKEN="$(printf '%s' "$ALL_SECRETS" | jq -r --arg name "$SECRET_NAME" '.[$name] // ""')"
+
+          if [ -z "$TOKEN" ]; then
+            echo "[cid:$CID] ERROR: secret '$SECRET_NAME' is not set on this repository, or is empty."
+            echo "[cid:$CID] Add it from the desktop app (Settings -> Account name, then Save),"
+            echo "[cid:$CID] or under Settings -> Secrets and variables -> Actions."
+            echo "[cid:$CID] Secrets available to this run:"
+            printf '%s' "$ALL_SECRETS" | jq -r 'keys[] | "  " + .'
+            exit 1
+          fi
+
+          echo "::add-mask::$TOKEN"
+          echo "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "[cid:$CID] Setup token resolved from '$SECRET_NAME'."
+
       # 7. Run Claude Code headlessly with the setup token.
       #    -p runs in non-interactive "print" mode.
       #    --dangerously-skip-permissions is needed so it can write files
@@ -240,7 +293,7 @@ jobs:
       #    copy of the same stream as a quick fallback for debugging.
       - name: Run Claude Code
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # CLAUDE_CODE_OAUTH_TOKEN is exported by "Resolve Claude setup token" above.
           CID: ${{ github.event.inputs.correlation_id }}
           MODEL: ${{ github.event.inputs.model }}
           EFFORT: ${{ github.event.inputs.effort }}
