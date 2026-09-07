@@ -19,10 +19,9 @@ on:
         type: string
         default: 'sonnet'
       account_name:
-        description: 'Account whose CLAUDE_CODE_OAUTH_TOKEN secret this run should use (e.g. "atef" -> ATEF_CLAUDE_CODE_OAUTH_TOKEN)'
-        required: false
+        description: 'Email of the Claude account whose setup token this run must use (e.g. "atef.saber@tildetech.ae" -> ATEF_SABER_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN)'
+        required: true
         type: string
-        default: ''
       effort:
         description: 'Effort level for the session'
         required: false
@@ -34,6 +33,14 @@ on:
           - xhigh
           - max
         default: 'medium'
+
+# Keyed on the account rather than the repository or branch: each engineer's runs
+# queue against their own, so two engineers dispatching at once do not cancel
+# each other. cancel-in-progress stays false - a half-finished run produces no
+# artifact, so cancelling one costs the whole generation.
+concurrency:
+  group: generate-tests-${{ github.event.inputs.account_name }}
+  cancel-in-progress: false
 
 jobs:
   generate-test-cases:
@@ -233,14 +240,22 @@ jobs:
       # 6b. Resolve which Claude setup token this run should use.
       #
       #     The desktop app stores each engineer's setup token as its own
-      #     repository secret named <ACCOUNT>_CLAUDE_CODE_OAUTH_TOKEN, and
-      #     passes the account as the account_name input. That name is only
-      #     known at run time, and the secrets context cannot be indexed by a
-      #     computed key, so the whole context is materialised once via toJSON
-      #     and the entry is picked out of it here.
+      #     repository secret named after their Claude account email -
+      #     uppercased, every non-alphanumeric run folded to a single
+      #     underscore, plus _CLAUDE_CODE_OAUTH_TOKEN. It passes that same
+      #     email as the account_name input, so:
       #
-      #     Falls back to the shared CLAUDE_CODE_OAUTH_TOKEN when no account is
-      #     supplied, so manual runs from the Actions tab keep working.
+      #       atef.saber@tildetech.ae -> ATEF_SABER_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN
+      #
+      #     The name is only known at run time and the secrets context cannot
+      #     be indexed by a computed key, so the whole context is materialised
+      #     once via toJSON and the entry is picked out of it here.
+      #
+      #     There is deliberately no fallback to a shared token. Several
+      #     engineers dispatch against this repository, each with their own
+      #     Claude account; falling back would silently run - and bill - as
+      #     whoever owns the shared secret rather than the engineer who started
+      #     the run. A missing secret is a configuration error, so it fails.
       #
       #     The token is written to the job env file and masked, never echoed.
       #     Only the chosen secret name and whether it was found are printed.
@@ -252,22 +267,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          SECRET_NAME="$(printf '%s' "${ACCOUNT_NAME:-}" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+//; s/_+$//')"
-
-          if [ -n "$SECRET_NAME" ]; then
-            SECRET_NAME="${SECRET_NAME}_CLAUDE_CODE_OAUTH_TOKEN"
-          else
-            SECRET_NAME="CLAUDE_CODE_OAUTH_TOKEN"
-            echo "[cid:$CID] No account_name supplied; falling back to the shared secret."
+          if [ -z "${ACCOUNT_NAME:-}" ]; then
+            echo "[cid:$CID] ERROR: no account_name supplied."
+            echo "[cid:$CID] Pass the email of the Claude account whose token this run should use."
+            exit 1
           fi
 
-          echo "[cid:$CID] Using secret '$SECRET_NAME'."
+          ACCOUNT_KEY="$(printf '%s' "$ACCOUNT_NAME" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+
+          SECRET_NAME="$(printf '%s' "$ACCOUNT_KEY" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+//; s/_+$//')"
+
+          if [ -z "$SECRET_NAME" ]; then
+            echo "[cid:$CID] ERROR: account_name '$ACCOUNT_NAME' has no alphanumeric characters,"
+            echo "[cid:$CID] so it cannot name a GitHub secret."
+            exit 1
+          fi
+
+          SECRET_NAME="${SECRET_NAME}_CLAUDE_CODE_OAUTH_TOKEN"
+
+          echo "[cid:$CID] Account '$ACCOUNT_KEY' -> secret '$SECRET_NAME'."
 
           TOKEN="$(printf '%s' "$ALL_SECRETS" | jq -r --arg name "$SECRET_NAME" '.[$name] // ""')"
 
           if [ -z "$TOKEN" ]; then
             echo "[cid:$CID] ERROR: secret '$SECRET_NAME' is not set on this repository, or is empty."
-            echo "[cid:$CID] Add it from the desktop app (Settings -> Account name, then Save),"
+            echo "[cid:$CID] Add it from the desktop app (Settings -> Account email, then Save),"
             echo "[cid:$CID] or under Settings -> Secrets and variables -> Actions."
             echo "[cid:$CID] Secrets available to this run:"
             printf '%s' "$ALL_SECRETS" | jq -r 'keys[] | "  " + .'
