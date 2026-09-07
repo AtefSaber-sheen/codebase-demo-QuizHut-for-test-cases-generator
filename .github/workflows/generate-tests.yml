@@ -242,28 +242,39 @@ jobs:
       #     The desktop app stores each engineer's setup token as its own
       #     repository secret named after their Claude account email -
       #     uppercased, every non-alphanumeric run folded to a single
-      #     underscore, plus _CLAUDE_CODE_OAUTH_TOKEN. It passes that same
-      #     email as the account_name input, so:
+      #     underscore, plus _CLAUDE_CODE_OAUTH_TOKEN:
       #
-      #       atef.saber@tildetech.ae -> ATEF_SABER_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN
+      #       systems.ai@tildetech.ae -> SYSTEMS_AI_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN
       #
-      #     The name is only known at run time and the secrets context cannot
-      #     be indexed by a computed key, so the whole context is materialised
-      #     once via toJSON and the entry is picked out of it here.
+      #     It passes that same email as the account_name input, and this step
+      #     picks the matching secret out of the roster below.
       #
-      #     There is deliberately no fallback to a shared token. Several
-      #     engineers dispatch against this repository, each with their own
-      #     Claude account; falling back would silently run - and bill - as
-      #     whoever owns the shared secret rather than the engineer who started
-      #     the run. A missing secret is a configuration error, so it fails.
+      #     Each secret is referenced by its literal name. Do NOT reintroduce
+      #     `toJSON(secrets)` here: serialising the whole secrets context and
+      #     enumerating its keys is indistinguishable from credential
+      #     exfiltration, and GitHub's scanner blocks the workflow outright
+      #     ("this workflow file may be malicious", every run parked as
+      #     action_required with no jobs). Referencing secrets one by one is
+      #     what keeps this file runnable.
+      #
+      #     ADDING AN ENGINEER: add one line to the env block below, mapping
+      #     their secret name to itself. The secret is created by the desktop
+      #     app on Save; this line is what lets the run read it. An account
+      #     with no line here fails with a message naming the exact secret and
+      #     the line to add.
+      #
+      #     There is deliberately no fallback to a shared token: falling back
+      #     would silently run - and bill - as whoever owns that token rather
+      #     than the engineer who started the run.
       #
       #     The token is written to the job env file and masked, never echoed.
-      #     Only the chosen secret name and whether it was found are printed.
       - name: Resolve Claude setup token
         env:
-          ALL_SECRETS: ${{ toJSON(secrets) }}
           ACCOUNT_NAME: ${{ github.event.inputs.account_name }}
           CID: ${{ github.event.inputs.correlation_id }}
+          # --- per-engineer roster: one line per account, literal secret names ---
+          SYSTEMS_AI_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.SYSTEMS_AI_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN }}
+          ATEF_SABER_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.ATEF_SABER_TILDETECH_AE_CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -287,14 +298,23 @@ jobs:
 
           echo "[cid:$CID] Account '$ACCOUNT_KEY' -> secret '$SECRET_NAME'."
 
-          TOKEN="$(printf '%s' "$ALL_SECRETS" | jq -r --arg name "$SECRET_NAME" '.[$name] // ""')"
+          # Indirect expansion reads only the one roster variable this run needs.
+          TOKEN="${!SECRET_NAME:-}"
 
           if [ -z "$TOKEN" ]; then
-            echo "[cid:$CID] ERROR: secret '$SECRET_NAME' is not set on this repository, or is empty."
-            echo "[cid:$CID] Add it from the desktop app (Settings -> Account email, then Save),"
-            echo "[cid:$CID] or under Settings -> Secrets and variables -> Actions."
-            echo "[cid:$CID] Secrets available to this run:"
-            printf '%s' "$ALL_SECRETS" | jq -r 'keys[] | "  " + .'
+            echo "[cid:$CID] ERROR: no token available for account '$ACCOUNT_KEY'."
+            echo "[cid:$CID] Expected secret: $SECRET_NAME"
+            echo "[cid:$CID]"
+            echo "[cid:$CID] Fix one of these:"
+            echo "[cid:$CID]  1. Create the secret - in the desktop app, set Account email to"
+            echo "[cid:$CID]     '$ACCOUNT_KEY' and press Save; or add it under Settings ->"
+            echo "[cid:$CID]     Secrets and variables -> Actions."
+            echo "[cid:$CID]  2. Add this account to the roster - in the 'Resolve Claude setup"
+            echo "[cid:$CID]     token' step of this workflow, add to the env block:"
+            # Assembled from pieces so this line never forms a literal
+            # "${{" that Actions would try to evaluate.
+            BRACE_OPEN='${'
+            echo "[cid:$CID]       $SECRET_NAME: $BRACE_OPEN{ secrets.$SECRET_NAME }}"
             exit 1
           fi
 
