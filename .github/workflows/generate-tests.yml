@@ -311,10 +311,11 @@ jobs:
             echo "[cid:$CID]     Secrets and variables -> Actions."
             echo "[cid:$CID]  2. Add this account to the roster - in the 'Resolve Claude setup"
             echo "[cid:$CID]     token' step of this workflow, add to the env block:"
-            # Assembled from pieces so this line never forms a literal
-            # "${{" that Actions would try to evaluate.
-            BRACE_OPEN='${'
-            echo "[cid:$CID]       $SECRET_NAME: $BRACE_OPEN{ secrets.$SECRET_NAME }}"
+            # Braces come from a variable so this file never contains the
+            # literal expression opener, which Actions would try to evaluate
+            # even here inside a shell comment.
+            OPEN='${'"{"
+            echo "[cid:$CID]       $SECRET_NAME: $OPEN secrets.$SECRET_NAME }}"
             exit 1
           fi
 
