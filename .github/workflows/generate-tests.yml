@@ -142,6 +142,8 @@ jobs:
         env:
           PROMPT_INPUT: ${{ github.event.inputs.prompt }}
           CID: ${{ github.event.inputs.correlation_id }}
+          MODEL: ${{ github.event.inputs.model }}
+          EFFORT: ${{ github.event.inputs.effort }}
         run: |
           set -euo pipefail
           echo "[cid:$CID] Building prompt..."
@@ -221,6 +223,28 @@ jobs:
               printf '%s\n' "$PROMPT_INPUT"
             } >> prompt.txt
           fi
+
+          # Run provenance. --model and --effort are CLI flags: the session
+          # cannot read either back, so without this block the three
+          # provenance columns have no source and Claude fills them from
+          # the surrounding text - a low-effort run shipped 30 rows
+          # reading "medium". These are the authoritative values, and
+          # they are the same ones handed to the run-log generator.
+          {
+            printf '\n\nRUN PROVENANCE (authoritative - use verbatim).\n'
+            printf 'This block is the ONLY source for the CSV provenance\n'
+            printf 'columns Claude Model, Effort Level and User Prompt,\n'
+            printf 'and for the run-provenance line in the report Summary.\n'
+            printf 'Do not infer them from anything else in this prompt,\n'
+            printf 'do not substitute a model family name, and do not\n'
+            printf 'fall back to a default value:\n\n'
+            printf '  Claude Model: %s\n' "${MODEL:-Unknown}"
+            printf '  Effort Level: %s\n' "${EFFORT:-Unknown}"
+            printf '  User Prompt (verbatim, between the markers):\n'
+            printf '  <<<USER_PROMPT\n'
+            printf '%s\n' "${PROMPT_INPUT:-}"
+            printf 'USER_PROMPT\n'
+          } >> prompt.txt
 
           echo "[cid:$CID] ---- Prompt used ----"
           cat prompt.txt
